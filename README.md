@@ -45,7 +45,7 @@ Built end-to-end as a consultancy deliverable during my MSc at Trinity College D
 
 ```bash
 pip install -r requirements.txt
-python -m uvicorn app:app --reload
+python3 -m uvicorn app:app --reload
 ```
 
 Then visit `http://localhost:8000`.
