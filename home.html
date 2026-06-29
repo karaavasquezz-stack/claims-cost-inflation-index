@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sedgwick Claims Cost Inflation Index</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">Sedgwick Claims Cost Inflation Index</div>
+  <nav>
+    <a href="/" class="active">Home</a>
+    <a href="/casualty">Casualty</a>
+    <ahref="/property">Property</a>
+  </nav>
+  <span class="tag">Prophet + SARIMAX · Irish P&amp;C claims</span>
+</header>
+
+<div class="main home">
+  <div class="hero">
+    <h1>Claims Cost Inflation — Combined Outlook</h1>
+    <p>Headline forecasts for Property and Casualty claims, benchmarked against Irish CPI and HICP. Open either page for the full interactive scenario model.</p>
+  </div>
+
+  <div id="status" style="text-align:center"></div>
+
+  <div class="home-grid">
+
+    <div class="home-section">
+      <h2>Casualty Claims</h2>
+      <div class="sub">Average settled claim cost · Prophet &amp; SARIMAX, base scenario</div>
+      <div class="kpis kpis-4" id="cas-kpis">
+        <div class="kpi"><div class="kpi-label">Latest 12mo avg</div><div class="kpi-val" id="cas-kv1">—</div></div>
+        <div class="kpi"><div class="kpi-label">Historical CAGR</div><div class="kpi-val up" id="cas-kv2">—</div></div>
+        <div class="kpi kpi-blue"><div class="kpi-label">Prophet 3yr</div><div class="kpi-val" id="cas-kv3">—</div></div>
+        <div class="kpi"><div class="kpi-label">SARIMAX 3yr</div><div class="kpi-val" id="cas-kv4">—</div></div>
+      </div>
+      <div class="chart-wrap" style="margin-top:14px"><canvas id="casChart"></canvas></div>
+      <a class="home-link" href="/casualty">Open full Casualty model →</a>
+    </div>
+
+    <div class="home-section">
+      <h2>Property Claims</h2>
+      <div class="sub">Average settlement cost (buildings + contents) · Prophet &amp; SARIMAX, base scenario</div>
+      <div class="kpis kpis-4" id="prop-kpis">
+        <div class="kpi"><div class="kpi-label">Latest 12mo avg</div><div class="kpi-val" id="prop-kv1">—</div></div>
+        <div class="kpi"><div class="kpi-label">Historical CAGR</div><div class="kpi-val up" id="prop-kv2">—</div></div>
+        <div class="kpi kpi-blue"><div class="kpi-label">Prophet 3yr</div><div class="kpi-val" id="prop-kv3">—</div></div>
+        <div class="kpi"><div class="kpi-label">SARIMAX 3yr</div><div class="kpi-val" id="prop-kv4">—</div></div>
+      </div>
+      <div class="chart-wrap" style="margin-top:14px"><canvas id="propChart"></canvas></div>
+      <a class="home-link" href="/property">Open full Property model →</a>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/charts.js"></script>
+<script>
+async function loadHome() {
+  setStatus('Loading combined summary…', 'loading');
+  try {
+    const res = await fetch('/api/home');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+
+    const fillKPIs = (prefix, d) => {
+      document.getElementById(prefix+'-kv1').textContent = fmtK(d.kpis.last_12mo_avg);
+      document.getElementById(prefix+'-kv2').textContent = '+' + d.kpis.hist_cagr + '%';
+      document.getElementById(prefix+'-kv3').textContent = fmtK(d.kpis.prophet_end_avg);
+      document.getElementById(prefix+'-kv4').textContent = fmtK(d.kpis.sarimax_end_avg);
+    };
+    fillKPIs('cas', data.casualty);
+    fillKPIs('prop', data.property);
+
+    buildDualForecastChart('casChart', data.casualty.observed, data.casualty.prophet_forecast, data.casualty.sarimax_forecast, 100000);
+    buildDualForecastChart('propChart', data.property.observed, data.property.prophet_forecast, data.property.sarimax_forecast);
+
+    setStatus('');
+  } catch (err) {
+    setStatus('Error loading summary: ' + err.message, 'error');
+  }
+}
+window.addEventListener('DOMContentLoaded', loadHome);
+</script>
+
+</body>
+</html>

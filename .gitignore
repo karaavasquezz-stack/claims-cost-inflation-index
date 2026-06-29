@@ -1,0 +1,7 @@
+data/
+model_cache.pkl
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.env

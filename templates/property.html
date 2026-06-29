@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Property Claims — Inflation Forecast</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">Sedgwick Claims Cost Inflation Index</div>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/property" class="active">Property</a>
+    <a href="/casualty">Casualty</a>
+  </nav>
+  <span class="tag">Property · Prophet + SARIMAX</span>
+</header>
+
+<div class="main">
+
+  <aside>
+    <div class="card">
+      <div class="card-title">Peril group</div>
+      <select id="sl-peril" onchange="runForecast()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+        <option value="ALL" selected>All perils</option>
+        <option value="Water & Flooding">Water &amp; Flooding</option>
+        <option value="Storm & Weather">Storm &amp; Weather</option>
+        <option value="Fire">Fire</option>
+        <option value="Theft & Vandalism">Theft &amp; Vandalism</option>
+        <option value="Accidental Damage">Accidental Damage</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Scenario presets</div>
+      <p style="font-size:11px;color:var(--muted);margin:0 0 10px;line-height:1.5">
+        Presets adjust the forecast horizon and cost-pressure assumptions together.
+        <strong>Low inflation</strong> models a soft economic environment — ECB tightening, restrained wage growth.
+        <strong>Central</strong> matches the current CSO trend with moderate severity uplift.
+        <strong>High pressure</strong> models persistent inflation, strong construction wage growth, and elevated legal costs.
+      </p>
+      <div class="presets">
+        <button class="preset-btn bear" onclick="applyPreset('bear', runForecast)">Low inflation</button>
+        <button class="preset-btn base" onclick="applyPreset('base', runForecast)">Central</button>
+        <button class="preset-btn bull" onclick="applyPreset('bull', runForecast)">High pressure</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Forecast horizon</div>
+
+      <div class="sl-row">
+        <div class="sl-header"><span class="sl-name">Months ahead</span><span class="sl-val" id="v-months">36 mo</span></div>
+        <input type="range" id="sl-months" min="6" max="36" step="6" value="36"
+               oninput="document.getElementById('v-months').textContent=this.value+' mo'">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:3px">
+          <span>6</span><span>12</span><span>18</span><span>24</span><span>30</span><span>36</span>
+        </div>
+      </div>
+
+      <button id="run-btn" onclick="runForecast()">Run forecast →</button>
+      <div id="status"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Model info</div>
+      <div style="font-size:12px;color:var(--muted);line-height:1.7">
+        <div>Models: <strong>Prophet &amp; SARIMAX</strong></div>
+        <div>Scale: <strong>Log → back-transform</strong></div>
+        <div>Seasonality: <strong>Yearly, multiplicative</strong></div>
+        <div>Regressors: <strong>HICP Δ, construction wage index</strong></div>
+        <div id="mape-info" style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+          Backtest MAPE: <strong>loading…</strong>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="content">
+
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-label">Latest 12mo avg cost</div><div class="kpi-val" id="kv-last">—</div><div class="kpi-sub">Settled claims (buildings + contents)</div></div>
+      <div class="kpi"><div class="kpi-label">Historical CAGR</div><div class="kpi-val up" id="kv-hist">—</div><div class="kpi-sub">Smoothed severity</div></div>
+      <div class="kpi"><div class="kpi-label">Total claims</div><div class="kpi-val" id="kv-total">—</div><div class="kpi-sub">Dataset total</div></div>
+      <div class="kpi kpi-blue"><div class="kpi-label">Prophet forecast end</div><div class="kpi-val" id="kv-prophet">—</div><div class="kpi-sub">Central scenario</div></div>
+      <div class="kpi"><div class="kpi-label">SARIMAX forecast end</div><div class="kpi-val" id="kv-sarimax">—</div><div class="kpi-sub">Central scenario</div></div>
+    </div>
+
+    <div>
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('forecast', tabNames)">Forecast</button>
+        <button class="tab-btn" onclick="switchTab('forecast_table', tabNames)">Forecast table</button>
+        <button class="tab-btn" onclick="switchTab('correlation', tabNames)">Correlation</button>
+        <button class="tab-btn" onclick="switchTab('seasonality', tabNames)">Seasonality &amp; YoY</button>
+        <button class="tab-btn" onclick="switchTab('backtest', tabNames)">Backtest accuracy</button>
+        <button class="tab-btn" onclick="switchTab('data', tabNames)">Data table</button>
+        <button class="tab-btn" onclick="switchTab('guide', tabNames)">Model guide</button>
+      </div>
+
+      <div id="tab-forecast" class="tab-panel active chart-card">
+        <div class="legend">
+          <span><span class="dot" style="background:#1D9E75"></span>Monthly actual</span>
+          <span><span class="swatch" style="background:#085041"></span>6-mo smoothed</span>
+          <span><span class="swatch" style="background:#2563EB"></span>Prophet forecast (90% CI)</span>
+          <span><span class="swatch" style="background:#D85A30;border-top:2px dashed #D85A30;height:0"></span>SARIMAX forecast</span>
+        </div>
+        <div class="chart-wrap-lg"><canvas id="forecastChart"></canvas></div>
+
+        <div class="chart-row" style="margin-top:18px">
+          <div class="chart-card" style="padding:14px">
+            <div class="chart-title">Monthly settled volume</div>
+            <div class="chart-wrap-sm"><canvas id="volChart"></canvas></div>
+          </div>
+          <div class="chart-card" style="padding:14px">
+            <div class="chart-title">About this forecast</div>
+            <p style="font-size:12px;color:var(--muted);line-height:1.6">
+              Both models are fit on the same monthly average property settlement cost series (buildings + contents
+              combined). Prophet uses the change in the rebased HICP index and the construction wage index as
+              exogenous regressors, decomposing the series into trend, yearly seasonality, and inflation-driven
+              effects. SARIMAX uses a grid-searched seasonal specification with month-on-month HICP change as its
+              exogenous regressor. Future regressor values are projected forward from their recent trailing trend.
+              The central scenario (default) applies no additional adjustment beyond the models' own baseline.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-forecast_table" class="tab-panel chart-card">
+        <div class="chart-title">Forecast figures — month by month</div>
+        <p style="font-size:12px;color:var(--muted);margin:4px 0 10px">
+          Prophet 90% confidence interval shown in brackets. All values are average property settlement cost (€).
+        </p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>Period</th>
+              <th class="num">Prophet (€)</th>
+              <th class="num">Prophet 90% CI</th>
+              <th class="num">SARIMAX (€)</th>
+            </tr></thead>
+            <tbody id="forecast-tbl-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="tab-correlation" class="tab-panel chart-card">
+        <div class="chart-title">Correlation of claim severity with inflation indices</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+          Pearson correlation between the 6-month smoothed average claim cost and (a) the CPI index level, and
+          (b) HICP year-on-year inflation, over the overlapping monthly history.
+        </p>
+        <div class="chart-wrap-sm"><canvas id="corrChart"></canvas></div>
+      </div>
+
+      <div id="tab-seasonality" class="tab-panel chart-card">
+        <div class="chart-title">Seasonality — monthly effect on claim cost (Prophet vs SARIMAX)</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Prophet's yearly seasonal component is extracted from a synthetic year with regressors held at their historical mean.
+          SARIMAX seasonality is derived from the average within-month deviation in the model's in-sample fitted values.
+          Both are expressed as a % effect above or below the annual average — positive means that month tends to run higher.
+        </p>
+        <div class="chart-wrap-sm"><canvas id="seasChart"></canvas></div>
+        <div class="chart-title" style="margin-top:18px">Year-on-year change (%)</div>
+        <div class="chart-wrap-sm"><canvas id="yoyChart"></canvas></div>
+      </div>
+
+      <div id="tab-backtest" class="tab-panel chart-card">
+        <div class="chart-title">Historical backtest — trained on 2020–2024, forecasting 2025</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+          Both models were refit using only data up to the end of 2024, then asked to forecast every month of 2025.
+          Comparing those forecasts to what actually happened gives an honest, out-of-sample error margin for each
+          model — this is a stronger accuracy test than fitting and reporting error on the same data.
+        </p>
+        <div class="chart-wrap"><canvas id="backtestChart"></canvas></div>
+        <div class="kpis kpis-4" style="margin-top:14px">
+          <div class="kpi"><div class="kpi-label">Prophet MAPE (2025 test)</div><div class="kpi-val" id="kv-pmape">—</div></div>
+          <div class="kpi"><div class="kpi-label">SARIMAX MAPE (2025 test)</div><div class="kpi-val" id="kv-smape">—</div></div>
+          <div class="kpi"><div class="kpi-label">Lower error model</div><div class="kpi-val" id="kv-winner">—</div></div>
+          <div class="kpi"><div class="kpi-label">Test window size</div><div class="kpi-val" id="kv-testn">—</div></div>
+        </div>
+      </div>
+
+      <div id="tab-data" class="tab-panel chart-card">
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Period</th><th class="num">Avg cost (€)</th><th class="num">Claims</th><th class="num">YoY %</th><th class="num">6mo smoothed (€)</th></tr></thead>
+            <tbody id="tbl-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="tab-guide" class="tab-panel chart-card">
+        <div class="chart-title">Model guide — key terms explained</div>
+        <div class="guide-grid">
+          <div class="guide-item"><div class="guide-term">Prophet</div><div class="guide-def">A forecasting model developed by Meta that splits a time series into trend, seasonality, and the effect of external regressors (here, HICP and construction wage changes). It's robust to missing data and easy to interpret component-by-component.</div></div>
+          <div class="guide-item"><div class="guide-term">SARIMAX</div><div class="guide-def">Seasonal AutoRegressive Integrated Moving Average with eXogenous regressors. Generalises classic ARIMA to handle yearly seasonal cycles and external inputs (here, the month-on-month change in HICP) at the same time.</div></div>
+          <div class="guide-item"><div class="guide-term">Scenario presets</div><div class="guide-def"><strong>Low inflation:</strong> models a soft macroeconomic environment — ECB tightening, subdued wage growth, no additional severity uplift. Good for best-case reserving. <strong>Central:</strong> the baseline forecast using current CSO inflation trends with moderate severity uplift (5%/yr). <strong>High pressure:</strong> persistent inflation, strong construction wage growth, elevated legal costs, and a seasonal uplift — appropriate for stress-testing reserves.</div></div>
+          <div class="guide-item"><div class="guide-term">90% confidence interval (CI)</div><div class="guide-def">The shaded band around the Prophet forecast. There's a 90% chance the actual future value falls within this range, based on the model's estimated uncertainty.</div></div>
+          <div class="guide-item"><div class="guide-term">MAPE</div><div class="guide-def">Mean Absolute Percentage Error — the average % difference between a model's forecast and the actual value. Lower is better; under 15% is considered good for claims cost data.</div></div>
+          <div class="guide-item"><div class="guide-term">Backtest</div><div class="guide-def">Training a model only on past data (here, 2020–2024) and testing it against a later period it never saw (2025), to get an honest read on real-world accuracy.</div></div>
+          <div class="guide-item"><div class="guide-term">Seasonality</div><div class="guide-def">The recurring within-year pattern in claim costs — e.g. certain months consistently running higher or lower than the underlying trend, independent of overall inflation. The seasonality tab now shows both Prophet's decomposed seasonal component and SARIMAX's data-driven monthly pattern for comparison.</div></div>
+          <div class="guide-item"><div class="guide-term">YoY (Year-on-Year) %</div><div class="guide-def">The percentage change in average claim cost compared to the same month one year earlier. Highlights momentum that a smoothed trend line can hide.</div></div>
+          <div class="guide-item"><div class="guide-term">Construction wage proxy</div><div class="guide-def">Average weekly earnings in the construction sector, used as a rough proxy for the labour-cost component of property reinstatement (rebuild and repair) claims.</div></div>
+          <div class="guide-item"><div class="guide-term">CPI</div><div class="guide-def">Consumer Price Index — Ireland's official measure of general price inflation across a basket of household goods and services.</div></div>
+          <div class="guide-item"><div class="guide-term">HICP</div><div class="guide-def">Harmonised Index of Consumer Prices — the EU-standardised inflation measure, allowing direct comparison of Ireland's inflation with other EU member states.</div></div>
+          <div class="guide-item"><div class="guide-term">Pearson correlation (r)</div><div class="guide-def">A statistic from -1 to +1 measuring how closely two series move together. +1 means they move in perfect lockstep, 0 means no relationship, -1 means they move in perfect opposition.</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="/static/charts.js"></script>
+<script>
+const tabNames = ['forecast','forecast_table','correlation','seasonality','backtest','data','guide'];
+const CLAIM_TYPE = 'property';
+
+async function runForecast() {
+  setStatus('Running forecast…', 'loading');
+  document.getElementById('run-btn').disabled = true;
+
+  const params = new URLSearchParams({
+    claim_type:     CLAIM_TYPE,
+    horizon_months: document.getElementById('sl-months').value,
+    cpi_pct:        2.5,
+    severity_pct:   5.0,
+    legal_mult:     1.2,
+    seasonal_adj:   0,
+    peril_group:    document.getElementById('sl-peril') ? document.getElementById('sl-peril').value : 'ALL',
+  });
+
+  try {
+    const res = await fetch('/api/forecast?' + params);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+
+    document.getElementById('kv-last').textContent    = fmtK(data.kpis.last_12mo_avg);
+    document.getElementById('kv-hist').textContent     = '+' + data.kpis.hist_cagr + '%';
+    document.getElementById('kv-total').textContent    = data.kpis.total_claims.toLocaleString('en-IE');
+    document.getElementById('kv-prophet').textContent  = fmtK(data.kpis.prophet_end_avg);
+    document.getElementById('kv-sarimax').textContent   = fmtK(data.kpis.sarimax_end_avg);
+
+    const bt = data.backtest;
+    document.getElementById('kv-pmape').textContent = bt.prophet_mape != null ? bt.prophet_mape+'%' : 'n/a';
+    document.getElementById('kv-smape').textContent = bt.sarimax_mape != null ? bt.sarimax_mape+'%' : 'n/a';
+    document.getElementById('kv-testn').textContent = bt.test_points.length + ' months';
+    if (bt.prophet_mape != null && bt.sarimax_mape != null) {
+      document.getElementById('kv-winner').textContent = bt.prophet_mape < bt.sarimax_mape ? 'Prophet' : 'SARIMAX';
+    }
+    document.getElementById('mape-info').innerHTML =
+      `Backtest MAPE: <strong>Prophet ${bt.prophet_mape ?? 'n/a'}%</strong> / <strong>SARIMAX ${bt.sarimax_mape ?? 'n/a'}%</strong>`;
+
+    buildDualForecastChart('forecastChart', data.observed, data.prophet_forecast, data.sarimax_forecast);
+    buildForecastTable('forecast-tbl-body', data.prophet_forecast, data.sarimax_forecast);
+    buildVolChart('volChart', data.observed);
+    buildCorrelationChart('corrChart', data.correlations);
+    buildDualSeasonalityChart('seasChart', data.seasonality_pct, data.sarimax_seasonality_pct || {});
+    buildYoYChart('yoyChart', data.observed, -100, 100);
+    if (bt.test_points.length) buildBacktestChart('backtestChart', bt.test_points);
+    buildTable('tbl-body', data.observed);
+
+    setStatus('');
+  } catch (err) {
+    setStatus('Error: ' + err.message, 'error');
+  } finally {
+    document.getElementById('run-btn').disabled = false;
+  }
+}
+window.addEventListener('DOMContentLoaded', runForecast);
+</script>
+
+</body>
+</html>
