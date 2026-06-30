@@ -645,6 +645,21 @@ _STORM    = {"Storm", "Lightning", "Weight of Snow",
 _FIRE     = {"Fire"}
 _THEFT    = {"Theft", "Burglary", "Malicious Damage", "Vandalism"}
 
+COUNTY_REGION_MAP: dict[str, str] = {
+    "Dublin":    "East",  "Kildare":  "East",     "Louth":     "East",
+    "Meath":     "East",  "Wexford":  "East",     "Wicklow":   "East",
+    "Carlow":    "Midlands", "Cavan":  "Midlands", "Kilkenny":  "Midlands",
+    "Laois":     "Midlands", "Longford": "Midlands", "Monaghan": "Midlands",
+    "Offaly":    "Midlands", "Westmeath": "Midlands",
+    "Cork":      "South / Southwest", "Kerry":     "South / Southwest",
+    "Limerick":  "South / Southwest", "Tipperary": "South / Southwest",
+    "Waterford": "South / Southwest",
+    "Clare":     "West / Northwest",  "Donegal":   "West / Northwest",
+    "Galway":    "West / Northwest",  "Leitrim":   "West / Northwest",
+    "Mayo":      "West / Northwest",  "Roscommon": "West / Northwest",
+    "Sligo":     "West / Northwest",
+}
+
 
 def assign_peril_group(peril: str) -> str:
     if peril in _WATER: return "Water & Flooding"
@@ -664,20 +679,48 @@ def load_property_raw() -> pd.DataFrame:
     df = df.dropna(subset=["Date of Loss"])
     df["Month"] = df["Date of Loss"].dt.to_period("M")
     df["peril_group"] = df["Peril/Loss Type"].fillna("").apply(assign_peril_group)
+    df["region"] = df["Risk Address COUNTY ONLY"].str.strip().map(COUNTY_REGION_MAP).fillna("Other")
     return df
 
 
-def agg_property_monthly(raw: pd.DataFrame, group: str = "ALL", cutoff: pd.Period = PROPERTY_TRAIN_CUTOFF) -> pd.DataFrame:
+def agg_property_monthly(raw: pd.DataFrame, group: str = "ALL", cutoff: pd.Period = PROPERTY_TRAIN_CUTOFF,
+                          building_contents: str = "ALL", claim_category: str = "ALL",
+                          region: str = "ALL") -> pd.DataFrame:
     mask = (raw["Month"] >= START_MONTH) & (raw["Month"] <= cutoff)
     if group != "ALL":
         mask = mask & (raw["peril_group"] == group)
-    sub = raw[mask]
+    if claim_category != "ALL":
+        mask = mask & (raw["Claim Category"] == claim_category)
+    if region != "ALL":
+        mask = mask & (raw["region"] == region)
+
+    sub = raw[mask].copy()
+
+    if building_contents == "Buildings":
+        sub["_cost"] = sub["Adjusted Settlement - Buildings"].fillna(0)
+        sub = sub[sub["_cost"] > 0]
+        cost_col = "_cost"
+    elif building_contents == "Contents":
+        sub["_cost"] = sub["Adjusted Settlement - Contents"].fillna(0)
+        sub = sub[sub["_cost"] > 0]
+        cost_col = "_cost"
+    else:
+        cost_col = "total_cost"
+
     monthly = (
         sub.groupby("Month", as_index=False)
-        .agg(total_reserve=("total_cost", "sum"), claim_count=("total_cost", "size"))
+        .agg(total_reserve=(cost_col, "sum"), claim_count=(cost_col, "size"))
     )
     monthly["average_claim_cost"] = monthly["total_reserve"] / monthly["claim_count"]
     return monthly.sort_values("Month").reset_index(drop=True)
+
+
+def _post_process_property_monthly(raw_agg: pd.DataFrame) -> pd.DataFrame:
+    out = raw_agg.rename(columns={"average_claim_cost": "avg_cost", "claim_count": "n_claims"}).copy()
+    out["ds"] = out["Month"].dt.to_timestamp()
+    out["avg_smooth"] = out["avg_cost"].rolling(6, min_periods=3).mean()
+    out["yoy"] = out["avg_cost"].pct_change(12) * 100
+    return out.reset_index(drop=True)
 
 
 def load_construction_proxy() -> tuple:
@@ -1250,7 +1293,8 @@ def _build_all_claims_response(data: dict, horizon_years: int, cpi_pct: float, s
 def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
                   cpi_pct: float = 2.5, severity_pct: float = 5.0, legal_mult: float = 1.2,
                   covid_adj: float = 0.0, seasonal_adj: float = 0.0,
-                  peril_group: str = "ALL", severity_group: str = "ALL", claims_subset: str = "settled") -> dict:
+                  peril_group: str = "ALL", severity_group: str = "ALL", claims_subset: str = "settled",
+                  building_contents: str = "ALL", claim_category: str = "ALL", region: str = "ALL") -> dict:
     bundle = _load_or_build_all()
     if claim_type == "casualty":
         if claims_subset == "all":
@@ -1264,7 +1308,19 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
         groups = bundle["property_groups"]
         data = groups.get(peril_group, groups.get("ALL"))
 
-    monthly = data["monthly"]
+    # Property: when new dimension filters are active, re-aggregate observed data from the raw CSV.
+    # Forecast lines (Prophet/SARIMAX) still come from the pre-cached peril-group model.
+    if claim_type == "property" and (building_contents != "ALL" or claim_category != "ALL" or region != "ALL"):
+        raw = load_property_raw()
+        filtered_agg = agg_property_monthly(
+            raw, group=peril_group,
+            building_contents=building_contents,
+            claim_category=claim_category,
+            region=region,
+        )
+        monthly = _post_process_property_monthly(filtered_agg)
+    else:
+        monthly = data["monthly"]
     last_obs = data["last_obs"]
     periods_needed = horizon_years * 12
 

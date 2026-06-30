@@ -57,16 +57,19 @@ async def api_home():
 
 @app.get("/api/forecast")
 async def api_forecast(
-    claim_type:     str   = Query(default="casualty", regex="^(casualty|property)$"),
-    horizon_months: int   = Query(default=36, ge=6, le=60),
-    cpi_pct:        float = Query(default=2.5, ge=0, le=15.0),
-    severity_pct:   float = Query(default=5.0, ge=-10, le=30),
-    legal_mult:     float = Query(default=1.2, ge=1.0, le=2.0),
-    covid_adj:      float = Query(default=0.0, ge=-20, le=20),
-    seasonal_adj:   float = Query(default=0.0, ge=-15, le=15),
-    peril_group:    str   = Query(default="ALL"),
-    severity_group: str   = Query(default="ALL"),
-    claims_subset:  str   = Query(default="settled", regex="^(settled|all)$"),
+    claim_type:        str   = Query(default="casualty", regex="^(casualty|property)$"),
+    horizon_months:    int   = Query(default=36, ge=6, le=60),
+    cpi_pct:           float = Query(default=2.5, ge=0, le=15.0),
+    severity_pct:      float = Query(default=5.0, ge=-10, le=30),
+    legal_mult:        float = Query(default=1.2, ge=1.0, le=2.0),
+    covid_adj:         float = Query(default=0.0, ge=-20, le=20),
+    seasonal_adj:      float = Query(default=0.0, ge=-15, le=15),
+    peril_group:       str   = Query(default="ALL"),
+    severity_group:    str   = Query(default="ALL"),
+    claims_subset:     str   = Query(default="settled", regex="^(settled|all)$"),
+    building_contents: str   = Query(default="ALL", regex="^(ALL|Buildings|Contents)$"),
+    claim_category:    str   = Query(default="ALL", regex="^(ALL|Domestic|Commercial)$"),
+    region:            str   = Query(default="ALL"),
 ):
     try:
         # Convert months to years (ceiling) for the model, then trim output to exact months
@@ -83,6 +86,9 @@ async def api_forecast(
             peril_group=peril_group,
             severity_group=severity_group,
             claims_subset=claims_subset,
+            building_contents=building_contents,
+            claim_category=claim_category,
+            region=region,
         )
         # Trim forecasts to exact months
         if "prophet_forecast" in result:  # settled claims

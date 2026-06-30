@@ -35,6 +35,35 @@
     </div>
 
     <div class="card">
+      <div class="card-title">Building &amp; Contents</div>
+      <select id="sl-bc" onchange="runForecast()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+        <option value="ALL" selected>All (buildings + contents)</option>
+        <option value="Buildings">Buildings only</option>
+        <option value="Contents">Contents only</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Claim category</div>
+      <select id="sl-cat" onchange="runForecast()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+        <option value="ALL" selected>All categories</option>
+        <option value="Domestic">Domestic</option>
+        <option value="Commercial">Commercial</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Region</div>
+      <select id="sl-region" onchange="runForecast()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+        <option value="ALL" selected>All regions</option>
+        <option value="East">East</option>
+        <option value="Midlands">Midlands</option>
+        <option value="South / Southwest">South / Southwest</option>
+        <option value="West / Northwest">West / Northwest</option>
+      </select>
+    </div>
+
+    <div class="card">
       <div class="card-title">Scenario presets</div>
       <p style="font-size:11px;color:var(--muted);margin:0 0 10px;line-height:1.5">
         Presets adjust the forecast horizon and cost-pressure assumptions together.
@@ -224,13 +253,16 @@ async function runForecast() {
   document.getElementById('run-btn').disabled = true;
 
   const params = new URLSearchParams({
-    claim_type:     CLAIM_TYPE,
-    horizon_months: document.getElementById('sl-months').value,
-    cpi_pct:        2.5,
-    severity_pct:   5.0,
-    legal_mult:     1.2,
-    seasonal_adj:   0,
-    peril_group:    document.getElementById('sl-peril') ? document.getElementById('sl-peril').value : 'ALL',
+    claim_type:        CLAIM_TYPE,
+    horizon_months:    document.getElementById('sl-months').value,
+    cpi_pct:           2.5,
+    severity_pct:      5.0,
+    legal_mult:        1.2,
+    seasonal_adj:      0,
+    peril_group:       document.getElementById('sl-peril')?.value    || 'ALL',
+    building_contents: document.getElementById('sl-bc')?.value       || 'ALL',
+    claim_category:    document.getElementById('sl-cat')?.value      || 'ALL',
+    region:            document.getElementById('sl-region')?.value   || 'ALL',
   });
 
   try {
