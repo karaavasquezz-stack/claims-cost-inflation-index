@@ -49,6 +49,9 @@ input[type=range] { width: 100%; accent-color: var(--teal-500); height: 4px; cur
 .preset-btn.bear { color: var(--blue); }
 .preset-btn.base { color: var(--teal-700); }
 .preset-btn.bull { color: var(--coral); }
+.preset-btn.bear.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+.preset-btn.base.active { background: var(--teal-500); color: #fff; border-color: var(--teal-500); }
+.preset-btn.bull.active { background: var(--coral); color: #fff; border-color: var(--coral); }
 
 #run-btn { width: 100%; padding: 10px; background: var(--teal-500); color: #fff;
            border: none; border-radius: 8px; font-size: 14px; font-weight: 600;

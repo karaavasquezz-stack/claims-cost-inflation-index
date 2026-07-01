@@ -72,9 +72,9 @@
         <strong>High pressure</strong> models persistent inflation, strong construction wage growth, and elevated legal costs.
       </p>
       <div class="presets">
-        <button class="preset-btn bear" onclick="applyPreset('bear', runForecast)">Low inflation</button>
-        <button class="preset-btn base" onclick="applyPreset('base', runForecast)">Central</button>
-        <button class="preset-btn bull" onclick="applyPreset('bull', runForecast)">High pressure</button>
+        <button class="preset-btn bear" onclick="applyPropertyPreset('bear')">Low inflation</button>
+        <button class="preset-btn base active" onclick="applyPropertyPreset('base')">Central</button>
+        <button class="preset-btn bull" onclick="applyPropertyPreset('bull')">High pressure</button>
       </div>
     </div>
 
@@ -82,11 +82,11 @@
       <div class="card-title">Forecast horizon</div>
 
       <div class="sl-row">
-        <div class="sl-header"><span class="sl-name">Months ahead</span><span class="sl-val" id="v-months">36 mo</span></div>
-        <input type="range" id="sl-months" min="6" max="36" step="6" value="36"
+        <div class="sl-header"><span class="sl-name">Months ahead</span><span class="sl-val" id="v-months">24 mo</span></div>
+        <input type="range" id="sl-months" min="6" max="24" step="6" value="24"
                oninput="document.getElementById('v-months').textContent=this.value+' mo'">
         <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:3px">
-          <span>6</span><span>12</span><span>18</span><span>24</span><span>30</span><span>36</span>
+          <span>6</span><span>12</span><span>18</span><span>24</span>
         </div>
       </div>
 
@@ -253,17 +253,43 @@
 const tabNames = ['forecast','forecast_table','correlation','seasonality','backtest','data','guide'];
 const CLAIM_TYPE = 'property';
 
+// Active scenario state — always initialised to Central before first run.
+// applyPropertyPreset() updates this when the user clicks a preset button.
+let _scenario = { annual_cpi: 4.5, sev: 2.5, legal: 1.1, covid: 0, seas: 0 };
+let _activePreset = 'base';
+
+function applyPropertyPreset(key) {
+  const p = PRESETS[key];
+  if (!p) return;
+  _scenario = { annual_cpi: p.annual_cpi, sev: p.sev, legal: p.legal, covid: p.covid || 0, seas: p.seas || 0 };
+  _activePreset = key;
+  // Update horizon slider to match preset
+  const sl = document.getElementById('sl-months');
+  if (sl) { sl.value = p.months; document.getElementById('v-months').textContent = p.months + ' mo'; }
+  // Highlight the active button
+  document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+  const activeBtn = document.querySelector('.preset-btn.' + key);
+  if (activeBtn) activeBtn.classList.add('active');
+  runForecast();
+}
+
 async function runForecast() {
   setStatus('Running forecast…', 'loading');
   document.getElementById('run-btn').disabled = true;
 
+  // Guard: if scenario state was never set, default to Central.
+  if (!_scenario || _scenario.annual_cpi == null) {
+    _scenario = { annual_cpi: 4.5, sev: 2.5, legal: 1.1, covid: 0, seas: 0 };
+  }
+
   const params = new URLSearchParams({
     claim_type:        CLAIM_TYPE,
     horizon_months:    document.getElementById('sl-months').value,
-    cpi_pct:           2.5,
-    severity_pct:      5.0,
-    legal_mult:        1.2,
-    seasonal_adj:      0,
+    annual_cpi_pct:    _scenario.annual_cpi,
+    severity_pct:      _scenario.sev,
+    legal_mult:        _scenario.legal,
+    covid_adj:         _scenario.covid,
+    seasonal_adj:      _scenario.seas,
     peril_group:       document.getElementById('sl-peril')?.value    || 'ALL',
     building_contents: document.getElementById('sl-bc')?.value       || 'ALL',
     claim_category:    document.getElementById('sl-cat')?.value      || 'ALL',

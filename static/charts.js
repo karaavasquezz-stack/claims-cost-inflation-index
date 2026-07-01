@@ -340,10 +340,15 @@ function buildVolChart(canvasId, observed) {
 // "bear" = low-inflation environment (e.g. ECB tightening, soft economy)
 // "base" = central / most-likely outcome matching current CSO trend
 // "bull" = high-pressure environment (persistent inflation, wage growth, legal reform delays)
+//
+// annual_cpi: annualised HICP projection rate fed directly to both models'
+//   exogenous regressors (property page). Targets: bear ~2%, base ~4.5%, bull ~10%.
+// sev: additional severity uplift % p.a. applied post-forecast via apply_scenario.
+// legal: legal-cost multiplier in apply_scenario.
 const PRESETS = {
-  bear: { months:18, cpi:1.5, sev:0,   legal:1.0, covid:0,  seas:0 },
-  base: { months:36, cpi:2.5, sev:5.0, legal:1.2, covid:0,  seas:0 },
-  bull: { months:36, cpi:4.0, sev:15,  legal:1.5, covid:5,  seas:5 },
+  bear: { months:24, annual_cpi:2.0,  sev:0,   legal:1.0, covid:0, seas:0 },
+  base: { months:24, annual_cpi:4.5,  sev:2.5, legal:1.1, covid:0, seas:0 },
+  bull: { months:24, annual_cpi:10.0, sev:5.0, legal:1.3, covid:0, seas:0 },
 };
 function applyPreset(key, onApplied) {
   const p = PRESETS[key];

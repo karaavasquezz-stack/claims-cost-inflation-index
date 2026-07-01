@@ -70,6 +70,7 @@ async def api_forecast(
     building_contents: str   = Query(default="ALL", regex="^(ALL|Buildings|Contents)$"),
     claim_category:    str   = Query(default="ALL", regex="^(ALL|Domestic|Commercial)$"),
     region:            str   = Query(default="ALL"),
+    annual_cpi_pct:    float = Query(default=4.5, ge=0.0, le=25.0),
 ):
     try:
         # Convert months to years (ceiling) for the model, then trim output to exact months
@@ -89,6 +90,7 @@ async def api_forecast(
             building_contents=building_contents,
             claim_category=claim_category,
             region=region,
+            annual_cpi_pct=annual_cpi_pct,
         )
         # Trim forecasts to exact months
         if "prophet_forecast" in result:  # settled claims

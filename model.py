@@ -76,6 +76,10 @@ PROPERTY_TEST_SPLIT   = "2024-01-01"   # Prophet/SARIMAX test split in the refer
 PROPERTY_FORECAST_MIN_CLAIMS = 50     # below this, no forecast attempt
 PROPERTY_FORECAST_MAX_MAPE   = 25.0   # at or above this, forecast is hidden
 
+# Default annualised HICP projection rate used when no scenario is specified.
+# Scenarios (bear/base/bull) override this at request time.
+PROPERTY_DEFAULT_ANNUAL_CPI  = 4.5
+
 # Curated 6-order grid: covers the orders that win most often on monthly
 # claims severity data without running all 32 combinations.
 _SARIMAX_REDUCED_GRID = [
@@ -863,6 +867,7 @@ def fit_sarimax_property(df: pd.DataFrame):
         return None
 
     last_delta = float(train["delta_HICP"].dropna().tail(6).mean())
+    last_hicp_level = float(df["HICP_adjusted"].dropna().iloc[-1])
     naive_exog = pd.DataFrame({"delta_HICP": [last_delta] * len(test)}, index=test.index)
     fc = best_res.get_forecast(steps=len(test), exog=naive_exog)
     fc_mu = np.asarray(fc.predicted_mean)
@@ -880,6 +885,7 @@ def fit_sarimax_property(df: pd.DataFrame):
         "train": train, "test": test, "eval": ev,
         "mape": float(ev["ape"].mean()),
         "last_delta": last_delta,
+        "last_hicp_level": last_hicp_level,
     }
 
 
@@ -927,6 +933,7 @@ def fit_sarimax_property_reduced_grid(df: pd.DataFrame, cached_best_order: tuple
         return None
 
     last_delta = float(train["delta_HICP"].dropna().tail(6).mean())
+    last_hicp_level = float(df["HICP_adjusted"].dropna().iloc[-1])
     naive_exog = pd.DataFrame({"delta_HICP": [last_delta] * len(test)}, index=test.index)
     fc     = best_res.get_forecast(steps=len(test), exog=naive_exog)
     fc_mu  = np.asarray(fc.predicted_mean)
@@ -944,13 +951,22 @@ def fit_sarimax_property_reduced_grid(df: pd.DataFrame, cached_best_order: tuple
         "train": train, "test": test, "eval": ev,
         "mape": float(ev["ape"].mean()),
         "last_delta": last_delta,
+        "last_hicp_level": last_hicp_level,
     }
 
 
-def sarimax_property_future(res, horizon: int) -> pd.DataFrame:
+def sarimax_property_future(res, horizon: int,
+                             annual_cpi_pct: float = PROPERTY_DEFAULT_ANNUAL_CPI) -> pd.DataFrame:
     if res is None:
         return pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
-    fc = res["model"].get_forecast(steps=horizon, exog=pd.DataFrame({"delta_HICP": [res["last_delta"]] * horizon}))
+    # Project HICP at the scenario annual rate: convert to a monthly absolute delta
+    # using the last observed HICP level so the exogenous series is scenario-specific.
+    last_hicp = res.get("last_hicp_level", None)
+    if last_hicp and last_hicp > 0:
+        monthly_delta = last_hicp * ((1 + annual_cpi_pct / 100) ** (1 / 12) - 1)
+    else:
+        monthly_delta = res["last_delta"]
+    fc = res["model"].get_forecast(steps=horizon, exog=pd.DataFrame({"delta_HICP": [monthly_delta] * horizon}))
     dates = pd.date_range(res["eval"].index[-1] + pd.DateOffset(months=1), periods=horizon, freq="MS")
     ci = np.asarray(fc.conf_int())
     return pd.DataFrame({
@@ -995,18 +1011,21 @@ def fit_prophet_property(df: pd.DataFrame):
     return {"model": m, "train": train, "test": ev, "mape": float(ev["ape"].mean())}
 
 
-def prophet_property_future(res, df: pd.DataFrame, horizon: int) -> pd.DataFrame:
+def prophet_property_future(res, df: pd.DataFrame, horizon: int,
+                             annual_cpi_pct: float = PROPERTY_DEFAULT_ANNUAL_CPI) -> pd.DataFrame:
     if res is None:
         return pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
     last_date = df["date"].max()
     future_dates = pd.date_range(last_date + pd.DateOffset(months=1), periods=horizon, freq="MS")
-    recent = df.tail(12)
-    hicp_slope = (recent["HICP_adjusted"].iloc[-1] - recent["HICP_adjusted"].iloc[0]) / len(recent)
-    constr_slope = (recent["Index_adjusted"].iloc[-1] - recent["Index_adjusted"].iloc[0]) / len(recent)
+    # Project both HICP and construction-wage index at the scenario annual rate
+    # using compound monthly growth from the last observed level.
+    monthly_factor = (1 + annual_cpi_pct / 100) ** (1 / 12)
+    last_hicp  = df["HICP_adjusted"].iloc[-1]
+    last_constr = df["Index_adjusted"].iloc[-1]
     future_df = pd.DataFrame({
         "ds": future_dates,
-        "HICP_adjusted":  [df["HICP_adjusted"].iloc[-1] + hicp_slope * (i+1) for i in range(horizon)],
-        "Index_adjusted": [df["Index_adjusted"].iloc[-1] + constr_slope * (i+1) for i in range(horizon)],
+        "HICP_adjusted":  [last_hicp   * monthly_factor ** (i + 1) for i in range(horizon)],
+        "Index_adjusted": [last_constr * monthly_factor ** (i + 1) for i in range(horizon)],
     })
     fc = res["model"].predict(future_df)
     return pd.DataFrame({
@@ -1294,6 +1313,9 @@ def _build_property(raw, hicp, cpi, construction_interp, construction_raw, group
 
     return {
         "monthly": monthly_out,
+        "prophet_res": prophet_res,
+        "sarimax_res": sarimax_res,
+        "df_engineered": df_all,
         "prophet_forecast": prophet_fc,
         "sarimax_forecast": sarimax_fc,
         "seasonality_pct": seasonality_pct,
@@ -1438,7 +1460,8 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
                   cpi_pct: float = 2.5, severity_pct: float = 5.0, legal_mult: float = 1.2,
                   covid_adj: float = 0.0, seasonal_adj: float = 0.0,
                   peril_group: str = "ALL", severity_group: str = "ALL", claims_subset: str = "settled",
-                  building_contents: str = "ALL", claim_category: str = "ALL", region: str = "ALL") -> dict:
+                  building_contents: str = "ALL", claim_category: str = "ALL", region: str = "ALL",
+                  annual_cpi_pct: float = PROPERTY_DEFAULT_ANNUAL_CPI) -> dict:
     bundle = _load_or_build_all()
     if claim_type == "casualty":
         if claims_subset == "all":
@@ -1476,11 +1499,13 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
             sarimax_res = fc_attempt["sarimax_res"]
             df_eng      = fc_attempt["df_engineered"]
 
-            p_future = prophet_property_future(prophet_res, df_eng, periods_needed)
-            s_future = (sarimax_property_future(sarimax_res, periods_needed)
+            p_future = prophet_property_future(prophet_res, df_eng, periods_needed, annual_cpi_pct)
+            s_future = (sarimax_property_future(sarimax_res, periods_needed, annual_cpi_pct)
                         if sarimax_res else _empty_fc.copy())
-            p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
-            s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+            # Inflation already baked into regressor projections; apply_scenario handles
+            # severity/legal/other adjustments only (cpi_pct=0).
+            p_future = apply_scenario(p_future, 0.0, severity_pct, legal_mult, covid_adj, seasonal_adj)
+            s_future = apply_scenario(s_future, 0.0, severity_pct, legal_mult, covid_adj, seasonal_adj)
 
             seasonality_pct         = property_seasonality(prophet_res)
             sarimax_seasonality_pct = property_sarimax_seasonality(sarimax_res)
@@ -1513,15 +1538,35 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
             forecast_status  = fc_attempt["status"]
             forecast_message = fc_attempt["message"]
     else:
-        # ── unfiltered path: use pre-cached models ────────────────────────────
+        # ── unfiltered / casualty path ────────────────────────────────────────
         monthly  = data["monthly"]
         last_obs = data["last_obs"]
-        p_future = (data["prophet_forecast"][data["prophet_forecast"]["ds"] > last_obs]
-                    .head(periods_needed).reset_index(drop=True))
-        s_future = (data["sarimax_forecast"][data["sarimax_forecast"]["ds"] > last_obs]
-                    .head(periods_needed).reset_index(drop=True))
-        p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
-        s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+
+        if claim_type == "property" and data.get("prophet_res") is not None:
+            # Recompute forecasts from cached model objects using the scenario HICP rate.
+            # No re-fitting — just model.predict() with a different regressor projection.
+            p_future = prophet_property_future(
+                data["prophet_res"], data["df_engineered"], periods_needed, annual_cpi_pct
+            )
+            s_future = sarimax_property_future(
+                data["sarimax_res"], periods_needed, annual_cpi_pct
+            )
+        else:
+            # Casualty or old cache without model objects: use pre-computed forecasts.
+            p_future = (data["prophet_forecast"][data["prophet_forecast"]["ds"] > last_obs]
+                        .head(periods_needed).reset_index(drop=True))
+            s_future = (data["sarimax_forecast"][data["sarimax_forecast"]["ds"] > last_obs]
+                        .head(periods_needed).reset_index(drop=True))
+
+        if claim_type == "property":
+            # Inflation is already baked into the regressor projections above;
+            # apply_scenario handles severity/legal/other adjustments only.
+            p_future = apply_scenario(p_future, 0.0, severity_pct, legal_mult, covid_adj, seasonal_adj)
+            s_future = apply_scenario(s_future, 0.0, severity_pct, legal_mult, covid_adj, seasonal_adj)
+        else:
+            p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+            s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+
         seasonality_pct         = data["seasonality_pct"]
         sarimax_seasonality_pct = data.get("sarimax_seasonality_pct", {})
         backtest                = data["backtest"]
