@@ -73,6 +73,20 @@ CASUALTY_SMOOTH     = 6
 PROPERTY_TRAIN_CUTOFF = pd.Period("2025-09", freq="M")
 PROPERTY_TEST_SPLIT   = "2024-01-01"   # Prophet/SARIMAX test split in the reference
 
+PROPERTY_FORECAST_MIN_CLAIMS = 50     # below this, no forecast attempt
+PROPERTY_FORECAST_MAX_MAPE   = 25.0   # at or above this, forecast is hidden
+
+# Curated 6-order grid: covers the orders that win most often on monthly
+# claims severity data without running all 32 combinations.
+_SARIMAX_REDUCED_GRID = [
+    ((1, 1, 1), (1, 0, 0, 12)),
+    ((1, 1, 1), (1, 1, 0, 12)),
+    ((0, 1, 1), (1, 0, 0, 12)),
+    ((1, 1, 0), (1, 0, 0, 12)),
+    ((2, 1, 1), (1, 0, 0, 12)),
+    ((1, 1, 1), (0, 0, 1, 12)),
+]
+
 
 # ── shared helpers ───────────────────────────────────────────────────────────
 
@@ -869,6 +883,70 @@ def fit_sarimax_property(df: pd.DataFrame):
     }
 
 
+def fit_sarimax_property_reduced_grid(df: pd.DataFrame, cached_best_order: tuple = None) -> dict | None:
+    """
+    AIC-selected SARIMAX using the curated 6-order grid plus the pre-cached
+    best order (if provided and not already in the grid).  Covers the orders
+    that win most often on monthly claims severity data; ~3-6× faster than
+    the full 32-combination grid search.  Return structure is identical to
+    fit_sarimax_property so all downstream helpers work unchanged.
+    """
+    sdf = df[["Month", "average_claim_cost", "delta_HICP"]].dropna().copy()
+    sdf.index = sdf["Month"].dt.to_timestamp()
+    sdf.index.freq = "MS"
+    sdf = sdf.drop(columns="Month")
+    train = sdf.loc[:"2023-12-01"]
+    test  = sdf.loc["2024-01-01":]
+    if len(train) < 12 or len(test) < 1:
+        return None
+
+    candidates = list(_SARIMAX_REDUCED_GRID)
+    if cached_best_order and cached_best_order not in candidates:
+        candidates.insert(0, cached_best_order)  # try the known winner first
+
+    best_aic, best_res, best_order, best_seas = np.inf, None, None, None
+    for order, seas in candidates:
+        try:
+            mdl = SARIMAX(
+                train["average_claim_cost"], exog=train[["delta_HICP"]],
+                order=order, seasonal_order=seas, trend="c",
+                enforce_stationarity=False, enforce_invertibility=False,
+            )
+            res = mdl.fit(disp=False, maxiter=500)
+            if not res.mle_retvals.get("converged", False):
+                continue
+            fc_check = res.get_forecast(steps=len(test), exog=test[["delta_HICP"]]).predicted_mean
+            if not np.isfinite(fc_check).all() or np.abs(fc_check).max() > 5_000_000:
+                continue
+            if res.aic < best_aic:
+                best_aic, best_res, best_order, best_seas = res.aic, res, order, seas
+        except Exception:
+            continue
+
+    if best_res is None:
+        return None
+
+    last_delta = float(train["delta_HICP"].dropna().tail(6).mean())
+    naive_exog = pd.DataFrame({"delta_HICP": [last_delta] * len(test)}, index=test.index)
+    fc     = best_res.get_forecast(steps=len(test), exog=naive_exog)
+    fc_mu  = np.asarray(fc.predicted_mean)
+    fc_ci  = np.asarray(fc.conf_int())
+
+    ev = test.copy()
+    ev["forecast"] = fc_mu
+    ev["lower"]    = fc_ci[:, 0]
+    ev["upper"]    = fc_ci[:, 1]
+    ev["abs_err"]  = (ev["average_claim_cost"] - ev["forecast"]).abs()
+    ev["ape"]      = ev["abs_err"] / ev["average_claim_cost"] * 100
+
+    return {
+        "model": best_res, "order": best_order, "seasonal": best_seas, "aic": best_aic,
+        "train": train, "test": test, "eval": ev,
+        "mape": float(ev["ape"].mean()),
+        "last_delta": last_delta,
+    }
+
+
 def sarimax_property_future(res, horizon: int) -> pd.DataFrame:
     if res is None:
         return pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
@@ -973,27 +1051,93 @@ def property_sarimax_seasonality(sarimax_res) -> dict:
 
 
 # =============================================================================
+# Filtered forecast helpers (property only)
+# =============================================================================
+
+def _parse_sarimax_order_str(order_str: str):
+    """'(1, 1, 1)x(1, 0, 0, 12)' → ((1,1,1), (1,0,0,12)) or (None, None)."""
+    try:
+        a, b = order_str.split("x")
+        order    = tuple(int(x) for x in a.strip("() ").split(","))
+        seasonal = tuple(int(x) for x in b.strip("() ").split(","))
+        return order, seasonal
+    except Exception:
+        return None, None
+
+
+def _try_property_filtered_forecast(filtered_agg: pd.DataFrame,
+                                     cached_sarimax_order_str: str = None) -> dict:
+    """
+    Attempt Prophet + reduced-grid SARIMAX on a filtered monthly aggregation.
+    Uses the real filtered data — no smoothing, no substitution.
+
+    Returns a dict with 'status':
+      "ok"                → MAPE threshold passed; includes model objects
+      "insufficient_data" → fewer than PROPERTY_FORECAST_MIN_CLAIMS claims
+      "poor_mape"         → Prophet backtest MAPE ≥ PROPERTY_FORECAST_MAX_MAPE
+      "model_failed"      → model could not be fitted (too few months / convergence)
+    """
+    total_claims = int(filtered_agg["claim_count"].sum())
+    if total_claims < PROPERTY_FORECAST_MIN_CLAIMS:
+        return {
+            "status": "insufficient_data",
+            "message": (
+                f"Only {total_claims:,} claims match this combination — "
+                f"at least {PROPERTY_FORECAST_MIN_CLAIMS} are required to produce a reliable forecast."
+            ),
+        }
+
+    hicp = load_property_hicp()
+    cpi  = load_property_cpi()
+    construction_interp, construction_raw = load_construction_proxy()
+    df = engineer_property_features(filtered_agg, hicp, construction_interp, construction_raw, cpi)
+
+    prophet_res = fit_prophet_property(df)
+    if prophet_res is None:
+        return {
+            "status": "model_failed",
+            "message": (
+                "The forecast model could not be fitted on this combination "
+                "(not enough months in the training or test window). "
+                "Try using fewer or broader filters."
+            ),
+        }
+
+    if prophet_res["mape"] >= PROPERTY_FORECAST_MAX_MAPE:
+        return {
+            "status": "poor_mape",
+            "message": (
+                f"Backtest MAPE is {prophet_res['mape']:.1f}% on this filter combination "
+                f"(threshold: {PROPERTY_FORECAST_MAX_MAPE:.0f}%). "
+                "The data is too thin or volatile for a reliable forecast. "
+                "Try using fewer or broader filters."
+            ),
+        }
+
+    cached_order = None
+    if cached_sarimax_order_str:
+        order, seasonal = _parse_sarimax_order_str(cached_sarimax_order_str)
+        if order and seasonal:
+            cached_order = (order, seasonal)
+
+    sarimax_res = fit_sarimax_property_reduced_grid(df, cached_best_order=cached_order)
+
+    return {
+        "status":       "ok",
+        "prophet_res":  prophet_res,
+        "sarimax_res":  sarimax_res,
+        "df_engineered": df,
+    }
+
+
+# =============================================================================
 # Scenario application (shared)
 # =============================================================================
 
 def apply_scenario(fc: pd.DataFrame, cpi_pct: float, severity_pct: float, legal_mult: float,
                     covid_adj_pct: float, seasonal_adj_pct: float) -> pd.DataFrame:
-    """
-    Layer a user-chosen scenario on top of the model's baseline forecast.
-
-    Important: the baseline forecast (fc, before this function runs) is
-    already driven by REAL measured inflation — Prophet/SARIMAX were fit
-    with actual CSO medical-cost and legal-proxy deltas as regressors, and
-    the forecast horizon projects those forward from their recent trailing
-    trend. This function does not replace that; it lets the user ask
-    "what if inflation runs hotter/cooler than the recent trend implies?"
-    by applying an additional compounding adjustment on top of the
-    already-inflation-aware baseline. cpi_pct and severity_pct represent
-    additional annual drift beyond the baseline trend; legal_mult scales
-    the contribution of legal/professional cost pressure specifically
-    (1.0 = no change to the baseline's own legal trend, 1.5 = 50% more
-    legal cost pressure than the measured baseline trend implies).
-    """
+    if fc.empty:
+        return fc
     legal_extra = (legal_mult - 1.0) * 0.08   # legal proxy's typical share of severity growth
     annual_extra = (
         cpi_pct / 100 + severity_pct / 100
@@ -1308,9 +1452,13 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
         groups = bundle["property_groups"]
         data = groups.get(peril_group, groups.get("ALL"))
 
-    # Property: when new dimension filters are active, re-aggregate observed data from the raw CSV.
-    # Forecast lines (Prophet/SARIMAX) still come from the pre-cached peril-group model.
+    forecast_status  = "ok"
+    forecast_message = None
+    periods_needed   = horizon_years * 12
+    _empty_fc = pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
+
     if claim_type == "property" and (building_contents != "ALL" or claim_category != "ALL" or region != "ALL"):
+        # ── filtered path: re-aggregate from raw CSV, then try to fit new models ──
         raw = load_property_raw()
         filtered_agg = agg_property_monthly(
             raw, group=peril_group,
@@ -1319,16 +1467,64 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
             region=region,
         )
         monthly = _post_process_property_monthly(filtered_agg)
+
+        cached_order_str = (data.get("backtest") or {}).get("sarimax_order")
+        fc_attempt = _try_property_filtered_forecast(filtered_agg, cached_order_str)
+
+        if fc_attempt["status"] == "ok":
+            prophet_res = fc_attempt["prophet_res"]
+            sarimax_res = fc_attempt["sarimax_res"]
+            df_eng      = fc_attempt["df_engineered"]
+
+            p_future = prophet_property_future(prophet_res, df_eng, periods_needed)
+            s_future = (sarimax_property_future(sarimax_res, periods_needed)
+                        if sarimax_res else _empty_fc.copy())
+            p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+            s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+
+            seasonality_pct         = property_seasonality(prophet_res)
+            sarimax_seasonality_pct = property_sarimax_seasonality(sarimax_res)
+
+            test_points = []
+            if sarimax_res is not None:
+                s_eval = sarimax_res["eval"]
+                p_test = prophet_res["test"]
+                for i in range(min(len(s_eval), len(p_test))):
+                    test_points.append({
+                        "date":    str(s_eval.index[i])[:10],
+                        "actual":  round(float(s_eval["average_claim_cost"].iloc[i]), 2),
+                        "prophet": round(float(p_test["forecast"].iloc[i]), 2),
+                        "sarimax": round(float(s_eval["forecast"].iloc[i]), 2),
+                    })
+            backtest = {
+                "prophet_mape":  round(prophet_res["mape"], 1),
+                "sarimax_mape":  round(sarimax_res["mape"], 1) if sarimax_res else None,
+                "sarimax_order": (f"{sarimax_res['order']}x{sarimax_res['seasonal']}"
+                                  if sarimax_res else None),
+                "test_points":   test_points,
+            }
+        else:
+            p_future                = _empty_fc.copy()
+            s_future                = _empty_fc.copy()
+            seasonality_pct         = {}
+            sarimax_seasonality_pct = {}
+            backtest                = {"prophet_mape": None, "sarimax_mape": None,
+                                       "sarimax_order": None, "test_points": []}
+            forecast_status  = fc_attempt["status"]
+            forecast_message = fc_attempt["message"]
     else:
-        monthly = data["monthly"]
-    last_obs = data["last_obs"]
-    periods_needed = horizon_years * 12
-
-    p_future = data["prophet_forecast"][data["prophet_forecast"]["ds"] > last_obs].head(periods_needed).reset_index(drop=True)
-    s_future = data["sarimax_forecast"][data["sarimax_forecast"]["ds"] > last_obs].head(periods_needed).reset_index(drop=True)
-
-    p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
-    s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+        # ── unfiltered path: use pre-cached models ────────────────────────────
+        monthly  = data["monthly"]
+        last_obs = data["last_obs"]
+        p_future = (data["prophet_forecast"][data["prophet_forecast"]["ds"] > last_obs]
+                    .head(periods_needed).reset_index(drop=True))
+        s_future = (data["sarimax_forecast"][data["sarimax_forecast"]["ds"] > last_obs]
+                    .head(periods_needed).reset_index(drop=True))
+        p_future = apply_scenario(p_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+        s_future = apply_scenario(s_future, cpi_pct, severity_pct, legal_mult, covid_adj, seasonal_adj)
+        seasonality_pct         = data["seasonality_pct"]
+        sarimax_seasonality_pct = data.get("sarimax_seasonality_pct", {})
+        backtest                = data["backtest"]
 
     def _f(v):
         try:
@@ -1372,22 +1568,24 @@ def get_forecast(claim_type: str = "casualty", horizon_years: int = 3,
         hist_cagr = 0.0
 
     return {
-        "observed": observed,
-        "prophet_forecast": prophet_pts,
-        "sarimax_forecast": sarimax_pts,
-        "seasonality_pct": data["seasonality_pct"],
-        "sarimax_seasonality_pct": data.get("sarimax_seasonality_pct", {}),
-        "correlations": data["correlations"],
-        "backtest": data["backtest"],
-        "inflation_inputs": data.get("inflation_inputs"),
-        "severity_breakdown": data.get("severity_breakdown"),
+        "observed":                observed,
+        "prophet_forecast":        prophet_pts,
+        "sarimax_forecast":        sarimax_pts,
+        "seasonality_pct":         seasonality_pct,
+        "sarimax_seasonality_pct": sarimax_seasonality_pct,
+        "correlations":            data["correlations"],
+        "backtest":                backtest,
+        "inflation_inputs":        data.get("inflation_inputs"),
+        "severity_breakdown":      data.get("severity_breakdown"),
         "kpis": {
-            "last_12mo_avg": round(float(last12_avg), 0),
-            "hist_cagr": round(float(hist_cagr), 2),
-            "total_claims": int(monthly["n_claims"].sum()),
+            "last_12mo_avg":   round(float(last12_avg), 0),
+            "hist_cagr":       round(float(hist_cagr), 2),
+            "total_claims":    int(monthly["n_claims"].sum()),
             "prophet_end_avg": round(float(p_end_avg), 0) if p_end_avg is not None else None,
             "sarimax_end_avg": round(float(s_end_avg), 0) if s_end_avg is not None else None,
         },
+        "forecast_status":  forecast_status,
+        "forecast_message": forecast_message,
     }
 
 

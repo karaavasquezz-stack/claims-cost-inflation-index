@@ -119,6 +119,11 @@
     </div>
 
     <div>
+      <div id="forecast-notice" style="display:none;padding:14px 18px;border-radius:8px;background:#FEF3C7;border:1px solid #F59E0B;color:#78350F;font-size:13px;margin-bottom:14px;line-height:1.6">
+        <strong>Forecast not available for this filter combination</strong><br>
+        <span id="forecast-notice-msg"></span>
+      </div>
+
       <div class="tabs">
         <button class="tab-btn active" onclick="switchTab('forecast', tabNames)">Forecast</button>
         <button class="tab-btn" onclick="switchTab('forecast_table', tabNames)">Forecast table</button>
@@ -270,29 +275,61 @@ async function runForecast() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
 
-    document.getElementById('kv-last').textContent    = fmtK(data.kpis.last_12mo_avg);
-    document.getElementById('kv-hist').textContent     = '+' + data.kpis.hist_cagr + '%';
-    document.getElementById('kv-total').textContent    = data.kpis.total_claims.toLocaleString('en-IE');
-    document.getElementById('kv-prophet').textContent  = fmtK(data.kpis.prophet_end_avg);
-    document.getElementById('kv-sarimax').textContent   = fmtK(data.kpis.sarimax_end_avg);
+    const forecastOk = !data.forecast_status || data.forecast_status === 'ok';
 
-    const bt = data.backtest;
-    document.getElementById('kv-pmape').textContent = bt.prophet_mape != null ? bt.prophet_mape+'%' : 'n/a';
-    document.getElementById('kv-smape').textContent = bt.sarimax_mape != null ? bt.sarimax_mape+'%' : 'n/a';
-    document.getElementById('kv-testn').textContent = bt.test_points.length + ' months';
-    if (bt.prophet_mape != null && bt.sarimax_mape != null) {
-      document.getElementById('kv-winner').textContent = bt.prophet_mape < bt.sarimax_mape ? 'Prophet' : 'SARIMAX';
+    // ── forecast-unavailable notice ───────────────────────────────────────────
+    const noticeEl    = document.getElementById('forecast-notice');
+    const noticeMsgEl = document.getElementById('forecast-notice-msg');
+    if (!forecastOk) {
+      noticeEl.style.display  = 'block';
+      noticeMsgEl.textContent = data.forecast_message || 'No forecast available for this filter combination.';
+    } else {
+      noticeEl.style.display  = 'none';
+      noticeMsgEl.textContent = '';
     }
-    document.getElementById('mape-info').innerHTML =
-      `Backtest MAPE: <strong>Prophet ${bt.prophet_mape ?? 'n/a'}%</strong> / <strong>SARIMAX ${bt.sarimax_mape ?? 'n/a'}%</strong>`;
 
-    buildDualForecastChart('forecastChart', data.observed, data.prophet_forecast, data.sarimax_forecast);
-    buildForecastTable('forecast-tbl-body', data.prophet_forecast, data.sarimax_forecast);
+    // ── KPI cards ─────────────────────────────────────────────────────────────
+    document.getElementById('kv-last').textContent   = fmtK(data.kpis.last_12mo_avg);
+    document.getElementById('kv-hist').textContent   = '+' + data.kpis.hist_cagr + '%';
+    document.getElementById('kv-total').textContent  = data.kpis.total_claims.toLocaleString('en-IE');
+    document.getElementById('kv-prophet').textContent = forecastOk ? fmtK(data.kpis.prophet_end_avg) : '—';
+    document.getElementById('kv-sarimax').textContent = forecastOk ? fmtK(data.kpis.sarimax_end_avg) : '—';
+
+    // ── backtest / model-info ─────────────────────────────────────────────────
+    const bt = data.backtest;
+    if (forecastOk) {
+      document.getElementById('kv-pmape').textContent = bt.prophet_mape != null ? bt.prophet_mape+'%' : 'n/a';
+      document.getElementById('kv-smape').textContent = bt.sarimax_mape != null ? bt.sarimax_mape+'%' : 'n/a';
+      document.getElementById('kv-testn').textContent = bt.test_points.length + ' months';
+      if (bt.prophet_mape != null && bt.sarimax_mape != null)
+        document.getElementById('kv-winner').textContent = bt.prophet_mape < bt.sarimax_mape ? 'Prophet' : 'SARIMAX';
+      document.getElementById('mape-info').innerHTML =
+        `Backtest MAPE: <strong>Prophet ${bt.prophet_mape ?? 'n/a'}%</strong> / <strong>SARIMAX ${bt.sarimax_mape ?? 'n/a'}%</strong>`;
+    } else {
+      ['kv-pmape','kv-smape','kv-testn','kv-winner'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.textContent = 'n/a';
+      });
+      document.getElementById('mape-info').innerHTML =
+        '<span style="color:var(--muted)">No backtest — forecast not available</span>';
+    }
+
+    // ── charts ────────────────────────────────────────────────────────────────
+    // Historical data always renders (it is always the real filtered data).
+    // Forecast lines only appear when the model passed the quality threshold.
+    buildDualForecastChart('forecastChart', data.observed,
+      forecastOk ? data.prophet_forecast : [],
+      forecastOk ? data.sarimax_forecast : []);
+    buildForecastTable('forecast-tbl-body',
+      forecastOk ? data.prophet_forecast : [],
+      forecastOk ? data.sarimax_forecast : []);
     buildVolChart('volChart', data.observed);
     buildCorrelationChart('corrChart', data.correlations);
-    buildDualSeasonalityChart('seasChart', data.seasonality_pct, data.sarimax_seasonality_pct || {});
+    buildDualSeasonalityChart('seasChart',
+      forecastOk ? (data.seasonality_pct || {}) : {},
+      forecastOk ? (data.sarimax_seasonality_pct || {}) : {});
     buildYoYChart('yoyChart', data.observed, -100, 100);
-    if (bt.test_points.length) buildBacktestChart('backtestChart', bt.test_points);
+    if (forecastOk && bt.test_points.length) buildBacktestChart('backtestChart', bt.test_points);
+    else destroyChart('backtestChart');
     buildTable('tbl-body', data.observed);
 
     setStatus('');
